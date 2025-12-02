@@ -142,7 +142,7 @@ async def start_handler(message: Message):
         # If they are subscribed but just typed /start (no link)
         await message.answer("👋 **Welcome!**\n\nYou are verified. \nCheck our public channel for new links.")
 
-# ### ADMIN UPLOAD HANDLER ###
+# ### ADMIN UPLOAD HANDLER (FIXED) ###
 @dp.message(F.video | F.photo)
 async def handle_file_upload(message: Message):
     # Only the owner can upload
@@ -152,27 +152,29 @@ async def handle_file_upload(message: Message):
     msg = await message.answer("⏳ **Processing...**")
     
     # 1. COPY to Storage Channel (Removes "Forwarded From" tag)
+    # We don't assign this to a variable because it only returns an ID, not the file.
     try:
-        # copy_to sends a clean copy of the message
-        sent_to_storage = await message.copy_to(chat_id=DB_CHANNEL_ID)
+        await message.copy_to(chat_id=DB_CHANNEL_ID)
     except Exception as e:
         await msg.edit_text(f"❌ Error saving to DB Channel: {e}")
         return
 
-    # 2. Get File ID and Type from the STORAGE CHANNEL message
+    # 2. Get File ID and Type from the ORIGINAL message (The one YOU sent)
+    # This file_id works perfectly fine because the bot has seen it.
     file_thumb = None
-    if sent_to_storage.video:
-        file_id = sent_to_storage.video.file_id
+    if message.video:
+        file_id = message.video.file_id
         file_type = 'video'
         caption = message.caption or ""
         # Attempt to grab a thumbnail
-        if sent_to_storage.video.thumbnail:
-            file_thumb = sent_to_storage.video.thumbnail.file_id
-    elif sent_to_storage.photo:
-        file_id = sent_to_storage.photo[-1].file_id
+        if message.video.thumbnail:
+            file_thumb = message.video.thumbnail.file_id
+    elif message.photo:
+        # Photos have multiple sizes, we take the last one (highest quality)
+        file_id = message.photo[-1].file_id
         file_type = 'photo'
         caption = message.caption or ""
-        file_thumb = sent_to_storage.photo[-1].file_id
+        file_thumb = message.photo[-1].file_id
     
     # 3. Save to NeonDB
     try:
@@ -195,7 +197,7 @@ async def handle_file_upload(message: Message):
             ])
             public_caption = f"🎥 **New Video!**\n\n{caption}\n\n👇 Click below to watch:"
 
-            # Try to send with Photo. If it fails (Thumbnail error), fallback to Text.
+            # Try to send with Photo. If it fails, fallback to Text.
             try:
                 if file_thumb:
                      await bot.send_photo(
@@ -208,7 +210,7 @@ async def handle_file_upload(message: Message):
                     raise Exception("No thumbnail")
             except Exception as e:
                 # Fallback: Send just text if photo fails
-                logger.warning(f"Could not send photo (Thumbnail error), sending text instead: {e}")
+                logger.warning(f"Could not send photo, sending text instead: {e}")
                 await bot.send_message(
                     chat_id=int(LOG_CHANNEL_ID),
                     text=public_caption,
@@ -216,8 +218,9 @@ async def handle_file_upload(message: Message):
                 )
 
         except Exception as e:
+            # We don't stop the bot if public post fails, we just notify admin
             await message.answer(f"⚠️ Public Channel Post Failed: {e}")
-
+            
 # ### KEEP-ALIVE SERVER (FOR RENDER) ###
 async def handle_ping(request):
     return web.Response(text="I am alive!")
