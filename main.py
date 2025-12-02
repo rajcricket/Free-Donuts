@@ -2,6 +2,8 @@ import os
 import logging
 import asyncio
 import base64
+from aiogram.types import BufferedInputFile
+import io # <--- Add this
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
@@ -142,7 +144,7 @@ async def start_handler(message: Message):
         # If they are subscribed but just typed /start (no link)
         await message.answer("👋 **Welcome!**\n\nYou are verified. \nCheck our public channel for new links.")
 
-# ### ADMIN UPLOAD HANDLER (FIXED) ###
+# ### ADMIN UPLOAD HANDLER (THUMBNAIL FIX) ###
 @dp.message(F.video | F.photo)
 async def handle_file_upload(message: Message):
     # Only the owner can upload
@@ -151,30 +153,30 @@ async def handle_file_upload(message: Message):
 
     msg = await message.answer("⏳ **Processing...**")
     
-    # 1. COPY to Storage Channel (Removes "Forwarded From" tag)
-    # We don't assign this to a variable because it only returns an ID, not the file.
+    # 1. COPY to Storage Channel
     try:
         await message.copy_to(chat_id=DB_CHANNEL_ID)
     except Exception as e:
         await msg.edit_text(f"❌ Error saving to DB Channel: {e}")
         return
 
-    # 2. Get File ID and Type from the ORIGINAL message (The one YOU sent)
-    # This file_id works perfectly fine because the bot has seen it.
-    file_thumb = None
+    # 2. Extract File Details
+    file_thumb_id = None
+    file_id = None
+    file_type = None
+    caption = message.caption or ""
+
     if message.video:
         file_id = message.video.file_id
         file_type = 'video'
-        caption = message.caption or ""
-        # Attempt to grab a thumbnail
+        # Check if thumbnail exists
         if message.video.thumbnail:
-            file_thumb = message.video.thumbnail.file_id
+            file_thumb_id = message.video.thumbnail.file_id
+            
     elif message.photo:
-        # Photos have multiple sizes, we take the last one (highest quality)
         file_id = message.photo[-1].file_id
         file_type = 'photo'
-        caption = message.caption or ""
-        file_thumb = message.photo[-1].file_id
+        file_thumb_id = message.photo[-1].file_id
     
     # 3. Save to NeonDB
     try:
@@ -186,7 +188,7 @@ async def handle_file_upload(message: Message):
         await msg.edit_text(f"❌ Database Error: {e}")
         return
 
-    # 4. Success Message to Admin
+    # 4. Success Message (Admin)
     await msg.edit_text(f"✅ **File Saved!**\n\n🆔 DB ID: `{db_id}`\n🔗 Link: `{deep_link}`", parse_mode="Markdown")
 
     # 5. AUTO POST TO PUBLIC CHANNEL
@@ -197,20 +199,34 @@ async def handle_file_upload(message: Message):
             ])
             public_caption = f"🎥 **New Video!**\n\n{caption}\n\n👇 Click below to watch:"
 
-            # Try to send with Photo. If it fails, fallback to Text.
-            try:
-                if file_thumb:
-                     await bot.send_photo(
+            # STRATEGY: Download Thumbnail to Memory -> Upload as New Photo
+            if file_thumb_id:
+                try:
+                    # A. Create a memory buffer
+                    file_in_memory = io.BytesIO()
+                    
+                    # B. Download the thumbnail from Telegram servers
+                    await bot.download(file=file_thumb_id, destination=file_in_memory)
+                    
+                    # C. Reset buffer position to start
+                    file_in_memory.seek(0)
+                    
+                    # D. Upload as a fresh photo
+                    # We give it a fake name 'thumb.jpg' so Telegram knows it's an image
+                    photo_file = BufferedInputFile(file_in_memory.read(), filename="thumb.jpg")
+                    
+                    await bot.send_photo(
                         chat_id=int(LOG_CHANNEL_ID),
-                        photo=file_thumb,
+                        photo=photo_file,
                         caption=public_caption,
                         reply_markup=keyboard
                     )
-                else:
-                    raise Exception("No thumbnail")
-            except Exception as e:
-                # Fallback: Send just text if photo fails
-                logger.warning(f"Could not send photo, sending text instead: {e}")
+                except Exception as e:
+                    # If download fails, fallback to text
+                    logger.error(f"Thumbnail Download Failed: {e}")
+                    raise e # Trigger the fallback below
+            else:
+                # No thumbnail exists at all
                 await bot.send_message(
                     chat_id=int(LOG_CHANNEL_ID),
                     text=public_caption,
@@ -218,8 +234,15 @@ async def handle_file_upload(message: Message):
                 )
 
         except Exception as e:
-            # We don't stop the bot if public post fails, we just notify admin
-            await message.answer(f"⚠️ Public Channel Post Failed: {e}")
+            # Final Fallback: Text Only
+            try:
+                await bot.send_message(
+                    chat_id=int(LOG_CHANNEL_ID),
+                    text=public_caption,
+                    reply_markup=keyboard
+                )
+            except:
+                pass # If even text fails, we give up silently
             
 # ### KEEP-ALIVE SERVER (FOR RENDER) ###
 async def handle_ping(request):
