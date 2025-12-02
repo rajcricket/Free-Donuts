@@ -199,7 +199,7 @@ async def start_handler(message: Message):
             logger.error(f"Error sending file: {e}")
             await message.answer("❌ Invalid Link.")
     else:
-        await message.answer("👋 **Welcome!**\n\nYou are verified.\nCheck our public channel for videos.")
+        await message.answer("👋 **Welcome!**\nCheck our public channel for more:\nhttps://t.me/desichudaivideoes")
 
 # ### NEW ADMIN COMMANDS ###
 
@@ -327,7 +327,7 @@ async def handle_file_upload(message: Message):
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📥 Click to Watch / Download", url=deep_link)]
             ])
-            public_caption = f"🎥 **New Video!**\n\n{caption}\n"
+            public_caption = f"🎥 **New Video!**\n{caption}\n"
 
             if file_thumb_id:
                 try:
