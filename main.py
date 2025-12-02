@@ -16,6 +16,7 @@ OWNER_ID = int(os.getenv("OWNER_ID"))
 DB_URI = os.getenv("DB_URI")
 DB_CHANNEL_ID = int(os.getenv("DB_CHANNEL_ID"))
 FS_CHANNEL_ID = int(os.getenv("FS_CHANNEL_ID"))
+FS_CHANNEL_ID_2 = int(os.getenv("FS_CHANNEL_ID_2")) # <--- Add this line
 LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID")
 
 # ### LOGGING ###
@@ -120,14 +121,14 @@ async def save_file(file_id, file_type, caption):
 
 # ### HELPER FUNCTIONS ###
 
-async def is_subscribed(user_id):
+async def is_subscribed(user_id, channel_id): # <--- Added channel_id arg
     try:
-        member = await bot.get_chat_member(chat_id=FS_CHANNEL_ID, user_id=user_id)
+        member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
         if member.status in ['left', 'kicked']:
             return False
         return True
     except Exception as e:
-        logger.error(f"Error checking subscription: {e}")
+        logger.error(f"Error checking subscription for {channel_id}: {e}")
         return True 
 
 def encode_payload(payload):
@@ -144,28 +145,44 @@ async def start_handler(message: Message):
     # 1. Track User (Add to DB)
     await add_user(message.from_user.id)
 
-    # 2. FORCE SUBSCRIBE CHECK
-    if not await is_subscribed(message.from_user.id):
+    # 2. FORCE SUBSCRIBE CHECK (Dual Channel)
+    # Check status of both channels
+    user_id = message.from_user.id
+    is_sub_1 = await is_subscribed(user_id, FS_CHANNEL_ID)
+    is_sub_2 = await is_subscribed(user_id, FS_CHANNEL_ID_2)
+
+    if not is_sub_1 or not is_sub_2:
+        # Get Invite Links (Use try/except for both)
         try:
-            chat = await bot.get_chat(FS_CHANNEL_ID)
-            invite_link = chat.invite_link
+            chat_1 = await bot.get_chat(FS_CHANNEL_ID)
+            link_1 = chat_1.invite_link
         except:
-            invite_link = "https://t.me/YOUR_BACKUP_CHANNEL"
+            link_1 = "https://t.me/YOUR_FIRST_CHANNEL"
+
+        try:
+            chat_2 = await bot.get_chat(FS_CHANNEL_ID_2)
+            link_2 = chat_2.invite_link
+        except:
+            link_2 = "https://t.me/YOUR_SECOND_CHANNEL"
 
         args = message.text.split(' ')
         payload = args[1] if len(args) > 1 else "start"
         
+        # Create Keyboard with 2 Join Buttons
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📢 Join Backup Channel", url=invite_link)],
+            [InlineKeyboardButton(text="📢 Join Channel 1", url=link_1)],
+            [InlineKeyboardButton(text="📢 Join Channel 2", url=link_2)],
             [InlineKeyboardButton(text="🔄 Try Again", url=f"https://t.me/{ (await bot.get_me()).username }?start={payload}")]
         ])
         
         await message.answer(
-            "⚠️ **Access Restricted**\n\nTo use this bot, you must join our Backup Channel first.", 
+            "⚠️ **Access Restricted**\n\nYou must join BOTH channels to use this bot.", 
             reply_markup=keyboard, 
             parse_mode="Markdown"
         )
         return
+
+    # ... rest of the code (Section 3: Process Deep Link) stays exactly the same ...
 
     # 3. Process Deep Link
     args = message.text.split(' ')
