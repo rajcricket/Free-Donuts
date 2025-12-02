@@ -2,22 +2,21 @@ import os
 import logging
 import asyncio
 import base64
-from aiogram.types import BufferedInputFile
-import io # <--- Add this
+import io
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import CommandStart, Command
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 import asyncpg
 
 # ### CONFIGURATION ###
-# Loading variables from Render Environment
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID"))
 DB_URI = os.getenv("DB_URI")
-DB_CHANNEL_ID = int(os.getenv("DB_CHANNEL_ID")) # Storage Channel (Private)
-FS_CHANNEL_ID = int(os.getenv("FS_CHANNEL_ID")) # Force Subscribe Channel (Backup)
-LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID")    # Public Channel (for auto-posting)
+DB_CHANNEL_ID = int(os.getenv("DB_CHANNEL_ID"))
+FS_CHANNEL_ID = int(os.getenv("FS_CHANNEL_ID"))
+LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID")
 
 # ### LOGGING ###
 logging.basicConfig(level=logging.INFO)
@@ -27,10 +26,12 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ### DATABASE FUNCTIONS ###
+# ### DATABASE FUNCTIONS (UPGRADED) ###
 async def init_db():
-    """Initializes the database connection and creates the table."""
+    """Initializes DB and performs auto-migration for new features."""
     conn = await asyncpg.connect(DB_URI)
+    
+    # 1. Create Files Table (Existing)
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS files (
             id SERIAL PRIMARY KEY,
@@ -39,18 +40,79 @@ async def init_db():
             caption TEXT
         )
     ''')
+
+    # 2. Migration: Add 'views' column if it doesn't exist
+    try:
+        await conn.execute('ALTER TABLE files ADD COLUMN views INTEGER DEFAULT 0')
+    except asyncpg.exceptions.DuplicateColumnError:
+        pass # Column already exists, safe to ignore
+
+    # 3. Create Users Table (New)
+    await conn.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY
+        )
+    ''')
+    
     return conn
+
+async def add_user(user_id):
+    """Adds a user to the database. Ignores if already exists."""
+    conn = await asyncpg.connect(DB_URI)
+    try:
+        await conn.execute('INSERT INTO users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING', user_id)
+    finally:
+        await conn.close()
+
+async def get_all_users():
+    """Fetches all user IDs for broadcast."""
+    conn = await asyncpg.connect(DB_URI)
+    try:
+        rows = await conn.fetch('SELECT user_id FROM users')
+        return [row['user_id'] for row in rows]
+    finally:
+        await conn.close()
+
+async def delete_user(user_id):
+    """Removes a blocked user."""
+    conn = await asyncpg.connect(DB_URI)
+    try:
+        await conn.execute('DELETE FROM users WHERE user_id = $1', user_id)
+    finally:
+        await conn.close()
+
+async def increment_views(db_id):
+    """Increments view count for a file."""
+    conn = await asyncpg.connect(DB_URI)
+    try:
+        await conn.execute('UPDATE files SET views = views + 1 WHERE id = $1', int(db_id))
+    finally:
+        await conn.close()
+
+async def get_stats_data():
+    """Gets total users, total files, and top viewed videos."""
+    conn = await asyncpg.connect(DB_URI)
+    try:
+        total_users = await conn.fetchval('SELECT COUNT(*) FROM users')
+        total_files = await conn.fetchval('SELECT COUNT(*) FROM files')
+        # Top 5 Viewed
+        top_files = await conn.fetch('SELECT caption, views FROM files ORDER BY views DESC LIMIT 5')
+        # Last 5 Uploaded
+        last_files = await conn.fetch('SELECT caption, views FROM files ORDER BY id DESC LIMIT 5')
+        return total_users, total_files, top_files, last_files
+    finally:
+        await conn.close()
 
 async def get_file(file_id_db):
     conn = await asyncpg.connect(DB_URI)
-    row = await conn.fetchrow('SELECT file_id, file_type, caption FROM files WHERE id = $1', int(file_id_db))
+    row = await conn.fetchrow('SELECT file_id, file_type, caption, views FROM files WHERE id = $1', int(file_id_db))
     await conn.close()
     return row
 
 async def save_file(file_id, file_type, caption):
     conn = await asyncpg.connect(DB_URI)
     row = await conn.fetchrow(
-        'INSERT INTO files (file_id, file_type, caption) VALUES ($1, $2, $3) RETURNING id',
+        'INSERT INTO files (file_id, file_type, caption, views) VALUES ($1, $2, $3, 0) RETURNING id',
         file_id, file_type, caption
     )
     await conn.close()
@@ -59,17 +121,13 @@ async def save_file(file_id, file_type, caption):
 # ### HELPER FUNCTIONS ###
 
 async def is_subscribed(user_id):
-    """Checks if the user is a member of the Force Subscribe channel."""
     try:
         member = await bot.get_chat_member(chat_id=FS_CHANNEL_ID, user_id=user_id)
-        # If user is left, kicked, or restricted, they are not subscribed
         if member.status in ['left', 'kicked']:
             return False
         return True
     except Exception as e:
         logger.error(f"Error checking subscription: {e}")
-        # If bot is not admin or channel is invalid, we return True (fail open) 
-        # to avoid locking users out due to bugs.
         return True 
 
 def encode_payload(payload):
@@ -83,17 +141,17 @@ def decode_payload(payload):
 
 @dp.message(CommandStart())
 async def start_handler(message: Message):
-    # 1. FORCE SUBSCRIBE CHECK (The Barrier)
-    # We check this immediately. If they aren't joined, they pass no further.
+    # 1. Track User (Add to DB)
+    await add_user(message.from_user.id)
+
+    # 2. FORCE SUBSCRIBE CHECK
     if not await is_subscribed(message.from_user.id):
         try:
             chat = await bot.get_chat(FS_CHANNEL_ID)
             invite_link = chat.invite_link
         except:
-            # Fallback if bot cannot fetch link (make sure Bot is Admin in Backup Channel)
-            invite_link = "https://t.me/YOUR_BACKUP_CHANNEL_LINK_HERE" 
+            invite_link = "https://t.me/YOUR_BACKUP_CHANNEL"
 
-        # We preserve the payload so they can click "Try Again" and get the video immediately
         args = message.text.split(' ')
         payload = args[1] if len(args) > 1 else "start"
         
@@ -103,13 +161,13 @@ async def start_handler(message: Message):
         ])
         
         await message.answer(
-            "⚠️ **Access Restricted**\n\nTo use this bot and view the hidden content, you must join our Backup Channel first.", 
+            "⚠️ **Access Restricted**\n\nTo use this bot, you must join our Backup Channel first.", 
             reply_markup=keyboard, 
             parse_mode="Markdown"
         )
         return
 
-    # 2. IF SUBSCRIBED: Process the Deep Link
+    # 3. Process Deep Link
     args = message.text.split(' ')
     if len(args) > 1:
         payload = args[1]
@@ -118,7 +176,9 @@ async def start_handler(message: Message):
             file_data = await get_file(db_id)
             
             if file_data:
-                # Send with PROTECT_CONTENT=True (No forward/save/download)
+                # Increment View Count
+                await increment_views(db_id)
+
                 if file_data['file_type'] == 'video':
                     await bot.send_video(
                         chat_id=message.chat.id,
@@ -133,34 +193,106 @@ async def start_handler(message: Message):
                         caption=file_data['caption'],
                         protect_content=True
                     )
-                else:
-                    await message.answer("File type not supported.")
             else:
-                await message.answer("❌ **File not found.** It might have been deleted.")
+                await message.answer("❌ **File not found.**")
         except Exception as e:
             logger.error(f"Error sending file: {e}")
-            await message.answer("❌ Invalid Link or File.")
+            await message.answer("❌ Invalid Link.")
     else:
-        # If they are subscribed but just typed /start (no link)
-        await message.answer("👋 **Welcome!**\n\n \nCheck our public channel for more.\n https://t.me/desichudaivideoes")
+        await message.answer("👋 **Welcome!**\n\nYou are verified.\nCheck our public channel for videos.")
 
-# ### ADMIN UPLOAD HANDLER (THUMBNAIL FIX) ###
+# ### NEW ADMIN COMMANDS ###
+
+@dp.message(Command("stats"))
+async def stats_handler(message: Message):
+    if message.from_user.id != OWNER_ID:
+        return
+
+    msg = await message.answer("📊 **Calculating Stats...**")
+    total_users, total_files, top_files, last_files = await get_stats_data()
+
+    # Format Top Files
+    top_text = "\n".join([f"• {row['caption'][:20]}.. - {row['views']} views" for row in top_files])
+    last_text = "\n".join([f"• {row['caption'][:20]}.. - {row['views']} views" for row in last_files])
+
+    text = (
+        f"📊 **Bot Statistics**\n\n"
+        f"👥 **Total Users:** `{total_users}`\n"
+        f"📂 **Total Files:** `{total_files}`\n\n"
+        f"🔥 **Top 5 Viewed:**\n{top_text}\n\n"
+        f"🆕 **Last 5 Uploads:**\n{last_text}"
+    )
+    await msg.edit_text(text, parse_mode="Markdown")
+
+@dp.message(Command("broadcast"))
+async def broadcast_handler(message: Message):
+    if message.from_user.id != OWNER_ID:
+        return
+    
+    if not message.reply_to_message:
+        await message.answer("⚠️ Please reply to a message to broadcast it.")
+        return
+
+    msg = await message.answer("📢 **Starting Broadcast...**")
+    
+    users = await get_all_users()
+    total = len(users)
+    success = 0
+    blocked = 0
+    deleted = 0
+    
+    for count, user_id in enumerate(users):
+        try:
+            # Copy the message (safest way to broadcast)
+            await message.reply_to_message.copy_to(chat_id=user_id)
+            success += 1
+        except TelegramForbiddenError:
+            # User blocked the bot
+            await delete_user(user_id)
+            blocked += 1
+        except TelegramRetryAfter as e:
+            # We hit a flood limit, sleep for the required time
+            await asyncio.sleep(e.retry_after)
+            try:
+                await message.reply_to_message.copy_to(chat_id=user_id)
+                success += 1
+            except:
+                pass
+        except Exception as e:
+            # User account deleted or other error
+            deleted += 1
+
+        # Anti-Flood Delay: Sleep 1 second every 20 messages
+        if count % 20 == 0:
+            await asyncio.sleep(1)
+            
+        # Update progress every 200 users
+        if count % 200 == 0:
+            await msg.edit_text(f"📢 **Broadcasting...**\nProgress: {count}/{total}")
+
+    await msg.edit_text(
+        f"✅ **Broadcast Complete**\n\n"
+        f"👥 Total: `{total}`\n"
+        f"✅ Success: `{success}`\n"
+        f"🚫 Blocked/Deleted: `{blocked + deleted}`"
+    )
+
+# ### ADMIN UPLOAD HANDLER (UNCHANGED) ###
 @dp.message(F.video | F.photo)
 async def handle_file_upload(message: Message):
-    # Only the owner can upload
     if message.from_user.id != OWNER_ID:
         return
 
     msg = await message.answer("⏳ **Processing...**")
     
-    # 1. COPY to Storage Channel
+    # 1. COPY to Storage
     try:
         await message.copy_to(chat_id=DB_CHANNEL_ID)
     except Exception as e:
         await msg.edit_text(f"❌ Error saving to DB Channel: {e}")
         return
 
-    # 2. Extract File Details
+    # 2. Extract Details
     file_thumb_id = None
     file_id = None
     file_type = None
@@ -169,10 +301,8 @@ async def handle_file_upload(message: Message):
     if message.video:
         file_id = message.video.file_id
         file_type = 'video'
-        # Check if thumbnail exists
         if message.video.thumbnail:
-            file_thumb_id = message.video.thumbnail.file_id
-            
+            file_thumb_id = message.video.thumbnail.file_id  
     elif message.photo:
         file_id = message.photo[-1].file_id
         file_type = 'photo'
@@ -188,10 +318,10 @@ async def handle_file_upload(message: Message):
         await msg.edit_text(f"❌ Database Error: {e}")
         return
 
-    # 4. Success Message (Admin)
+    # 4. Success Message
     await msg.edit_text(f"✅ **File Saved!**\n\n🆔 DB ID: `{db_id}`\n🔗 Link: `{deep_link}`", parse_mode="Markdown")
 
-    # 5. AUTO POST TO PUBLIC CHANNEL
+    # 5. AUTO POST
     if LOG_CHANNEL_ID:
         try:
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -199,52 +329,28 @@ async def handle_file_upload(message: Message):
             ])
             public_caption = f"🎥 **New Video!**\n\n{caption}\n"
 
-            # STRATEGY: Download Thumbnail to Memory -> Upload as New Photo
             if file_thumb_id:
                 try:
-                    # A. Create a memory buffer
+                    # Download/Upload fix
+                    file_info = await bot.get_file(file_thumb_id)
                     file_in_memory = io.BytesIO()
-                    
-                    # B. Download the thumbnail from Telegram servers
-                    await bot.download(file=file_thumb_id, destination=file_in_memory)
-                    
-                    # C. Reset buffer position to start
+                    await bot.download_file(file_info.file_path, file_in_memory)
                     file_in_memory.seek(0)
-                    
-                    # D. Upload as a fresh photo
-                    # We give it a fake name 'thumb.jpg' so Telegram knows it's an image
                     photo_file = BufferedInputFile(file_in_memory.read(), filename="thumb.jpg")
                     
-                    await bot.send_photo(
-                        chat_id=int(LOG_CHANNEL_ID),
-                        photo=photo_file,
-                        caption=public_caption,
-                        reply_markup=keyboard
-                    )
+                    await bot.send_photo(chat_id=int(LOG_CHANNEL_ID), photo=photo_file, caption=public_caption, reply_markup=keyboard)
                 except Exception as e:
-                    # If download fails, fallback to text
-                    logger.error(f"Thumbnail Download Failed: {e}")
-                    raise e # Trigger the fallback below
+                    logger.error(f"Thumb Error: {e}")
+                    await bot.send_message(chat_id=int(LOG_CHANNEL_ID), text=public_caption, reply_markup=keyboard)
             else:
-                # No thumbnail exists at all
-                await bot.send_message(
-                    chat_id=int(LOG_CHANNEL_ID),
-                    text=public_caption,
-                    reply_markup=keyboard
-                )
-
+                await bot.send_message(chat_id=int(LOG_CHANNEL_ID), text=public_caption, reply_markup=keyboard)
         except Exception as e:
-            # Final Fallback: Text Only
             try:
-                await bot.send_message(
-                    chat_id=int(LOG_CHANNEL_ID),
-                    text=public_caption,
-                    reply_markup=keyboard
-                )
+                await bot.send_message(chat_id=int(LOG_CHANNEL_ID), text=public_caption, reply_markup=keyboard)
             except:
-                pass # If even text fails, we give up silently
-            
-# ### KEEP-ALIVE SERVER (FOR RENDER) ###
+                pass
+
+# ### KEEP-ALIVE ###
 async def handle_ping(request):
     return web.Response(text="I am alive!")
 
@@ -258,12 +364,11 @@ async def start_web_server():
     await site.start()
     logger.info(f"Web server started on port {port}")
 
-# ### MAIN ENTRY POINT ###
 async def main():
-    await start_web_server() # Start web server
-    await init_db()          # Connect to DB
+    await start_web_server()
+    await init_db()
     logger.info("Bot is starting...")
-    await dp.start_polling(bot) # Start Bot
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
