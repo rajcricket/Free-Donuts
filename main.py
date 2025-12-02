@@ -142,7 +142,7 @@ async def start_handler(message: Message):
             await message.answer("❌ Invalid Link or File.")
     else:
         # If they are subscribed but just typed /start (no link)
-        await message.answer("👋 **Welcome!**\n\nYou are verified. \nCheck our public channel for new links.")
+        await message.answer("👋 **Welcome!**\n\n \nCheck our public channel for more.\n https://t.me/desichudaivideoes")
 
 # ### ADMIN UPLOAD HANDLER (THUMBNAIL FIX) ###
 @dp.message(F.video | F.photo)
@@ -197,7 +197,7 @@ async def handle_file_upload(message: Message):
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📥 Click to Watch / Download", url=deep_link)]
             ])
-            public_caption = f"🎥 **New Video!**\n\n{caption}\n\n👇 Click below to watch:"
+            public_caption = f"🎥 **New Video!**\n\n{caption}\n"
 
             # STRATEGY: Download Thumbnail to Memory -> Upload as New Photo
             if file_thumb_id:
