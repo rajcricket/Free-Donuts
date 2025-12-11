@@ -11,25 +11,33 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, B
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 import asyncpg
 
+# ### HELPER: SAFE ENV LOADER ###
+def get_env_int(key, default=0):
+    val = os.getenv(key, str(default))
+    try:
+        return int(val)
+    except:
+        return default
+
 # ### CONFIGURATION ###
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID = int(os.getenv("OWNER_ID"))
+OWNER_ID = get_env_int("OWNER_ID")
 DB_URI = os.getenv("DB_URI")
-DB_CHANNEL_ID = int(os.getenv("DB_CHANNEL_ID"))
-FS_CHANNEL_ID = int(os.getenv("FS_CHANNEL_ID"))
-FS_CHANNEL_ID_2 = int(os.getenv("FS_CHANNEL_ID_2"))
-LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID") # <--- FIXED: Added this back
+DB_CHANNEL_ID = get_env_int("DB_CHANNEL_ID")
+FS_CHANNEL_ID = get_env_int("FS_CHANNEL_ID")
+FS_CHANNEL_ID_2 = get_env_int("FS_CHANNEL_ID_2")
+LOG_CHANNEL_ID = get_env_int("LOG_CHANNEL_ID")
 
-# ### CHANNEL MAP (The Routing System) ###
+# ### CHANNEL MAP ###
 CHANNEL_MAP = {
-    "donut": int(os.getenv("CH_DONUT_ID", 0)),
-    "brownie": int(os.getenv("CH_BROWNIE_ID", 0)),
-    "eclair": int(os.getenv("CH_ECLAIR_ID", 0)),
-    "peachpie": int(os.getenv("CH_PEACH_ID", 0)),
-    "creamroll": int(os.getenv("CH_SOFT_ID", 0)), 
-    "berry": int(os.getenv("CH_SOFT_ID", 0)),     
-    "macaron": int(os.getenv("CH_SOFT_ID", 0)),
-    "lavacake": int(os.getenv("CH_BROWNIE_ID", 0)) 
+    "donut": get_env_int("CH_DONUT_ID"),
+    "brownie": get_env_int("CH_BROWNIE_ID"),
+    "eclair": get_env_int("CH_ECLAIR_ID"),
+    "peachpie": get_env_int("CH_PEACH_ID"),
+    "creamroll": get_env_int("CH_SOFT_ID"), 
+    "berry": get_env_int("CH_SOFT_ID"),     
+    "macaron": get_env_int("CH_SOFT_ID"),
+    "lavacake": get_env_int("CH_BROWNIE_ID") 
 }
 
 # ### METAPHOR DICTIONARY ###
@@ -63,7 +71,7 @@ dp = Dispatcher()
 async def init_db():
     conn = await asyncpg.connect(DB_URI)
     
-    # 1. Create table if it doesn't exist (Standard)
+    # 1. Base Table
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS files (
             id SERIAL PRIMARY KEY,
@@ -76,16 +84,15 @@ async def init_db():
             uploaded_at TIMESTAMP DEFAULT NOW()
         )
     ''')
-
-    # 2. THE FIX: Force add columns for existing tables
-    # We use a loop to catch the "DuplicateColumnError" if they already exist
-    for col in ['product', 'flavor']:
+    
+    # 2. AUTO-MIGRATION: Add missing columns if they don't exist
+    # This loop safely adds 'product', 'flavor', and 'thumb_id' to old databases
+    for col in ['product', 'flavor', 'thumb_id']:
         try:
             await conn.execute(f'ALTER TABLE files ADD COLUMN {col} TEXT')
         except asyncpg.exceptions.DuplicateColumnError:
-            pass # Column already exists, skip it
-            
-    # 3. Create other tables
+            pass 
+
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS batches (
             id SERIAL PRIMARY KEY,
@@ -98,11 +105,11 @@ async def init_db():
     await conn.execute('CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY)')
     return conn
 
-async def save_file(file_id, file_type, caption):
+async def save_file(file_id, file_type, caption, thumb_id=None):
     conn = await asyncpg.connect(DB_URI)
     row = await conn.fetchrow(
-        'INSERT INTO files (file_id, file_type, caption, views) VALUES ($1, $2, $3, 0) RETURNING id',
-        file_id, file_type, caption
+        'INSERT INTO files (file_id, file_type, caption, views, thumb_id) VALUES ($1, $2, $3, 0, $4) RETURNING id',
+        file_id, file_type, caption, thumb_id
     )
     await conn.close()
     return row['id']
@@ -199,18 +206,15 @@ async def start_handler(message: Message):
             await message.answer("❌ Invalid link.")
             
     else:
-        # 3. Main Menu (Product Channels)
-        # We use standard Invite Links or Usernames here. 
-        # Since channels are private, ensure you have the Invite Link ready or let user just click button
-        # NOTE: You must replace these placeholders with your actual Invite Links if you want them to work perfectly.
+        # 3. Main Menu
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Yummy Donut 🤤", url="https://t.me/+L4qyqfjkDA0xZTVl")],
-            [InlineKeyboardButton(text="Hot Brownies 🍫", url="https://t.me/+aBJN7J7nnV9hMDQ1")],
-            [InlineKeyboardButton(text="Creamy Éclairs 🧁", url="https://t.me/+BPU1yousVjI1YTE1")],
-            [InlineKeyboardButton(text="Peach Pies 🍑", url="https://t.me/+DBrJZcFMWchjMjc1")],
-            [InlineKeyboardButton(text="Softies", url="https://t.me/+TRYCv65PRns1YWQ1")]
+            [InlineKeyboardButton(text="🍩 The Glazed Ring", url="https://t.me/+L4qyqfjkDA0xZTVl")],
+            [InlineKeyboardButton(text="🍫 Midnight Brownies", url="https://t.me/+aBJN7J7nnV9hMDQ1")],
+            [InlineKeyboardButton(text="🧁 Creamy Éclairs", url="https://t.me/+BPU1yousVjI1YTE1")],
+            [InlineKeyboardButton(text="🍑 Peach Pies", url="https://t.me/+DBrJZcFMWchjMjc1")],
+            [InlineKeyboardButton(text="🍥 Softies", url="https://t.me/+TRYCv65PRns1YWQ1")]
         ])
-        await message.answer("👋 **Welcome to The Viral Bakery!**\n\nChoose your order SIR!:", reply_markup=kb)
+        await message.answer("👋 **Welcome to the Viral Bakery!**\n\nChoose a counter in our channels to browse.", reply_markup=kb)
 
 async def send_video_to_user(chat_id, video_data):
     caption = f"{video_data['caption'] or ''}\n\n🍰 **{PRODUCTS.get(video_data['product'], 'Sweet')}** • {FLAVORS.get(video_data['flavor'], 'Special')}"
@@ -242,17 +246,29 @@ async def handle_upload(message: Message):
     
     msg = await message.answer("⏳ Saving...")
     
-    # 1. Copy to Storage DB (Raw Backup)
+    # 1. Copy to Storage DB
     try: await message.copy_to(DB_CHANNEL_ID)
     except: pass
     
     # 2. Extract Data
-    fid = message.video.file_id if message.video else message.photo[-1].file_id
-    ftype = 'video' if message.video else 'photo'
+    fid = None
+    ftype = 'photo'
     caption = message.caption or ""
+    thumb_id = None # New variable
+
+    if message.video:
+        fid = message.video.file_id
+        ftype = 'video'
+        # CAPTURE THUMBNAIL HERE
+        if message.video.thumbnail:
+            thumb_id = message.video.thumbnail.file_id
+    elif message.photo:
+        fid = message.photo[-1].file_id
+        ftype = 'photo'
+        thumb_id = fid # For photo files, the file itself is the thumb
     
-    # 3. Save to DB
-    db_id = await save_file(fid, ftype, caption)
+    # 3. Save to DB (Now with thumb_id)
+    db_id = await save_file(fid, ftype, caption, thumb_id)
     
     # 4. Check Batch
     conn = await asyncpg.connect(DB_URI)
@@ -310,8 +326,12 @@ async def flavor_selected(callback: CallbackQuery):
     
     status_msg = await callback.message.edit_text("🚀 Publishing...")
     bot_username = (await bot.get_me()).username
-    target_channel = CHANNEL_MAP.get(prod, int(LOG_CHANNEL_ID or 0)) # Uses LOG_CHANNEL_ID if prod not found
+    target_channel = CHANNEL_MAP.get(prod, LOG_CHANNEL_ID)
     
+    if not target_channel or target_channel == 0:
+        await status_msg.edit_text(f"❌ **ERROR:** Channel for '{prod}' missing in Render variables.")
+        return
+
     for db_id in ids_to_update:
         await update_file_meta(db_id, prod, flav)
         f_data = await get_file(db_id)
@@ -324,14 +344,22 @@ async def flavor_selected(callback: CallbackQuery):
         # Post to Public Channel (Target)
         try:
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔞 Watch in Bot", url=deep_link)]])
-            if f_data['file_type'] == 'video':
-                await bot.send_video(target_channel, f_data['file_id'], caption=caption_public, reply_markup=kb)
-            else:
+            
+            # CHECK: Do we have a thumbnail ID in the database?
+            if f_data.get('thumb_id'):
+                # YES -> Send as Photo (The Fix)
+                await bot.send_photo(target_channel, f_data['thumb_id'], caption=caption_public, reply_markup=kb)
+            elif f_data['file_type'] == 'photo':
+                # YES -> It's already a photo
                 await bot.send_photo(target_channel, f_data['file_id'], caption=caption_public, reply_markup=kb)
+            else:
+                # NO -> Old video file without thumb saved. Fallback to video.
+                await bot.send_video(target_channel, f_data['file_id'], caption=caption_public, reply_markup=kb)
+                
         except Exception as e:
             logger.error(f"Failed Public Post: {e}")
 
-        # Post to Storage Channel (Archive with Metadata) - FIXED REQUIREMENT
+        # Post to Storage Channel
         try:
             if f_data['file_type'] == 'video':
                 await bot.send_video(DB_CHANNEL_ID, f_data['file_id'], caption=caption_storage)
