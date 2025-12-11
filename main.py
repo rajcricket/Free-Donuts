@@ -21,7 +21,15 @@ def get_env_int(key, default=0):
 
 # ### CONFIGURATION ###
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID = get_env_int("OWNER_ID")
+# --- PATCH START: Multiple Admins ---
+# Load "ADMIN_IDS" from Render (comma separated: 123, 456, 789)
+raw_ids = os.getenv("ADMIN_IDS", "")
+ADMIN_IDS = [int(x.strip()) for x in raw_ids.split(",") if x.strip().isdigit()]
+# Fallback: If no list found, try the old OWNER_ID variable
+if not ADMIN_IDS:
+    old_owner = get_env_int("OWNER_ID")
+    if old_owner: ADMIN_IDS.append(old_owner)
+# --- PATCH END ---
 DB_URI = os.getenv("DB_URI")
 DB_CHANNEL_ID = get_env_int("DB_CHANNEL_ID")
 FS_CHANNEL_ID = get_env_int("FS_CHANNEL_ID")
@@ -68,42 +76,33 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # ### DATABASE FUNCTIONS ###
-async def init_db():
-    conn = await asyncpg.connect(DB_URI)
-    
-    # 1. Base Table
-    await conn.execute('''
-        CREATE TABLE IF NOT EXISTS files (
-            id SERIAL PRIMARY KEY,
-            file_id TEXT NOT NULL,
-            file_type TEXT NOT NULL,
-            caption TEXT,
-            product TEXT,
-            flavor TEXT,
-            views INTEGER DEFAULT 0,
-            uploaded_at TIMESTAMP DEFAULT NOW()
-        )
-    ''')
-    
-    # 2. AUTO-MIGRATION: Add missing columns if they don't exist
-    # This loop safely adds 'product', 'flavor', and 'thumb_id' to old databases
-    for col in ['product', 'flavor', 'thumb_id']:
-        try:
-            await conn.execute(f'ALTER TABLE files ADD COLUMN {col} TEXT')
-        except asyncpg.exceptions.DuplicateColumnError:
-            pass 
+# ... after init_db() ...
 
-    await conn.execute('''
-        CREATE TABLE IF NOT EXISTS batches (
-            id SERIAL PRIMARY KEY,
-            admin_id BIGINT,
-            expected_count INTEGER,
-            collected_ids INTEGER[],
-            created_at TIMESTAMP DEFAULT NOW()
-        )
-    ''')
-    await conn.execute('CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY)')
-    return conn
+# --- PATCH START: Stats & Broadcast DB Functions ---
+async def get_stats_data():
+    conn = await asyncpg.connect(DB_URI)
+    try:
+        total_users = await conn.fetchval('SELECT COUNT(*) FROM users')
+        total_files = await conn.fetchval('SELECT COUNT(*) FROM files')
+        # Top 5 by views
+        top_files = await conn.fetch('SELECT caption, views FROM files ORDER BY views DESC LIMIT 5')
+        return total_users, total_files, top_files
+    finally:
+        await conn.close()
+
+async def get_all_users():
+    conn = await asyncpg.connect(DB_URI)
+    rows = await conn.fetch('SELECT user_id FROM users')
+    await conn.close()
+    return [r['user_id'] for r in rows]
+
+async def delete_user(user_id):
+    conn = await asyncpg.connect(DB_URI)
+    await conn.execute('DELETE FROM users WHERE user_id=$1', user_id)
+    await conn.close()
+# --- PATCH END ---
+
+# ... before save_file(...) ...
 
 async def save_file(file_id, file_type, caption, thumb_id=None):
     conn = await asyncpg.connect(DB_URI)
@@ -226,11 +225,63 @@ async def send_video_to_user(chat_id, video_data):
     else:
         await bot.send_photo(chat_id, video_data['file_id'], caption=caption, protect_content=True, reply_markup=kb)
 
+# ... after send_video_to_user ...
+
+# --- PATCH START: Admin Commands ---
+@dp.message(Command("stats"))
+async def stats_cmd(message: Message):
+    if message.from_user.id not in ADMIN_IDS: return
+    
+    msg = await message.answer("📊 Calculating...")
+    users, files, top = await get_stats_data()
+    
+    top_text = "\n".join([f"• {r['caption'][:15]}... ({r['views']} views)" for r in top])
+    
+    await msg.edit_text(
+        f"📊 **Bakery Stats**\n\n"
+        f"👥 Users: `{users}`\n"
+        f"📂 Files: `{files}`\n\n"
+        f"🔥 **Top viewed:**\n{top_text}"
+    )
+
+@dp.message(Command("broadcast"))
+async def broadcast_cmd(message: Message):
+    if message.from_user.id not in ADMIN_IDS: return
+    if not message.reply_to_message:
+        await message.answer("⚠️ Reply to a message to broadcast.")
+        return
+
+    msg = await message.answer("📢 **Broadcasting...**")
+    users = await get_all_users()
+    count = 0
+    blocked = 0
+    
+    for i, uid in enumerate(users):
+        try:
+            await message.reply_to_message.copy_to(uid)
+            count += 1
+        except TelegramForbiddenError:
+            await delete_user(uid)
+            blocked += 1
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after)
+            try: await message.reply_to_message.copy_to(uid); count+=1
+            except: pass
+        except: pass
+        
+        if i % 20 == 0: await asyncio.sleep(1) # Anti-flood
+        if i % 200 == 0: await msg.edit_text(f"📢 Sending: {i}/{len(users)}")
+        
+    await msg.edit_text(f"✅ **Done!**\nSent: {count}\nBlocked/Deleted: {blocked}")
+# --- PATCH END ---
+
+# ... before start_batch ...
+
 # ### ADMIN BATCH & UPLOAD LOGIC ###
 
 @dp.message(Command("batch"))
 async def start_batch(message: Message):
-    if message.from_user.id != OWNER_ID: return
+    if message.from_user.id not in ADMIN_IDS: return # <--- UPDATED
     try:
         count = int(message.text.split()[1])
         conn = await asyncpg.connect(DB_URI)
@@ -242,7 +293,7 @@ async def start_batch(message: Message):
 
 @dp.message(F.video | F.photo)
 async def handle_upload(message: Message):
-    if message.from_user.id != OWNER_ID: return
+    if message.from_user.id not in ADMIN_IDS: return # <--- UPDATED
     
     msg = await message.answer("⏳ Saving...")
     
