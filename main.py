@@ -76,6 +76,43 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # ### DATABASE FUNCTIONS ###
+
+async def init_db():
+    conn = await asyncpg.connect(DB_URI)
+    
+    # 1. Base Table
+    await conn.execute('''
+        CREATE TABLE IF NOT EXISTS files (
+            id SERIAL PRIMARY KEY,
+            file_id TEXT NOT NULL,
+            file_type TEXT NOT NULL,
+            caption TEXT,
+            product TEXT,
+            flavor TEXT,
+            views INTEGER DEFAULT 0,
+            uploaded_at TIMESTAMP DEFAULT NOW()
+        )
+    ''')
+    
+    # 2. AUTO-MIGRATION: Add missing columns if they don't exist
+    for col in ['product', 'flavor', 'thumb_id']:
+        try:
+            await conn.execute(f'ALTER TABLE files ADD COLUMN {col} TEXT')
+        except asyncpg.exceptions.DuplicateColumnError:
+            pass 
+
+    await conn.execute('''
+        CREATE TABLE IF NOT EXISTS batches (
+            id SERIAL PRIMARY KEY,
+            admin_id BIGINT,
+            expected_count INTEGER,
+            collected_ids INTEGER[],
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    ''')
+    await conn.execute('CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY)')
+    return conn
+
 # ... after init_db() ...
 
 # --- PATCH START: Stats & Broadcast DB Functions ---
