@@ -62,6 +62,8 @@ dp = Dispatcher()
 # ### DATABASE FUNCTIONS ###
 async def init_db():
     conn = await asyncpg.connect(DB_URI)
+    
+    # 1. Create table if it doesn't exist (Standard)
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS files (
             id SERIAL PRIMARY KEY,
@@ -74,6 +76,16 @@ async def init_db():
             uploaded_at TIMESTAMP DEFAULT NOW()
         )
     ''')
+
+    # 2. THE FIX: Force add columns for existing tables
+    # We use a loop to catch the "DuplicateColumnError" if they already exist
+    for col in ['product', 'flavor']:
+        try:
+            await conn.execute(f'ALTER TABLE files ADD COLUMN {col} TEXT')
+        except asyncpg.exceptions.DuplicateColumnError:
+            pass # Column already exists, skip it
+            
+    # 3. Create other tables
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS batches (
             id SERIAL PRIMARY KEY,
