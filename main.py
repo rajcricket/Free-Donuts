@@ -42,21 +42,21 @@ CHANNEL_MAP = {
 
 # ### METAPHOR DICTIONARY ###
 PRODUCTS = {
-    "donut": "🍩 Donut",
-    "brownie": "🍫 Brownie",
-    "eclair": "🧁 Éclair",
+    "donut": "🍩Sweet Donut",
+    "brownie": "🍫Hot Brownie",
+    "eclair": "🧁Creamy Éclair",
     "peachpie": "🍑 Peach Pie",
-    "creamroll": "🍥 Cream Roll",
+    "creamroll": "🍨 Softies",
     "berry": "🫐 Berry Mix",
     "macaron": "🍪 Macaron",
     "lavacake": "🔥 Lava Cake"
 }
 
 FLAVORS = {
-    "desi": "🇮🇳 Desi",
-    "asian": "🌏 Asian",
-    "western": "👱‍♀️ Western",
-    "african": "🌍 African"
+    "desi": "🍛 Desi",
+    "asian": "🍣 Asian",
+    "western": "🍷 Western",
+    "african": "🍌 African"
 }
 
 # ### LOGGING ###
@@ -208,8 +208,8 @@ async def start_handler(message: Message):
     else:
         # 3. Main Menu
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🍩 The Glazed Ring", url="https://t.me/+L4qyqfjkDA0xZTVl")],
-            [InlineKeyboardButton(text="🍫 Midnight Brownies", url="https://t.me/+aBJN7J7nnV9hMDQ1")],
+            [InlineKeyboardButton(text="🍩 Yummy Donut", url="https://t.me/+L4qyqfjkDA0xZTVl")],
+            [InlineKeyboardButton(text="🍫 Hot Brownies", url="https://t.me/+aBJN7J7nnV9hMDQ1")],
             [InlineKeyboardButton(text="🧁 Creamy Éclairs", url="https://t.me/+BPU1yousVjI1YTE1")],
             [InlineKeyboardButton(text="🍑 Peach Pies", url="https://t.me/+DBrJZcFMWchjMjc1")],
             [InlineKeyboardButton(text="🍥 Softies", url="https://t.me/+TRYCv65PRns1YWQ1")]
@@ -343,21 +343,38 @@ async def flavor_selected(callback: CallbackQuery):
 
         # Post to Public Channel (Target)
         try:
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔞 Watch in Bot", url=deep_link)]])
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Your meal is ready👩🏻‍🍳", url=deep_link)]])
             
-            # CHECK: Do we have a thumbnail ID in the database?
+            # --- PATCH START: Download & Re-upload Thumbnail ---
             if f_data.get('thumb_id'):
-                # YES -> Send as Photo (The Fix)
-                await bot.send_photo(target_channel, f_data['thumb_id'], caption=caption_public, reply_markup=kb)
+                try:
+                    # 1. Get file path from Telegram servers
+                    file_info = await bot.get_file(f_data['thumb_id'])
+                    
+                    # 2. Download into memory (RAM)
+                    downloaded_file = io.BytesIO()
+                    await bot.download_file(file_info.file_path, downloaded_file)
+                    downloaded_file.seek(0) 
+                    
+                    # 3. Create a fresh InputFile
+                    thumb_input = BufferedInputFile(downloaded_file.read(), filename="thumbnail.jpg")
+                    
+                    # 4. Send as a REAL Photo
+                    await bot.send_photo(target_channel, thumb_input, caption=caption_public, reply_markup=kb)
+                except Exception as e:
+                    logger.error(f"Thumbnail Download Failed: {e}")
+                    # Fallback: Send full video if thumb fails
+                    await bot.send_video(target_channel, f_data['file_id'], caption=caption_public, reply_markup=kb)
+
             elif f_data['file_type'] == 'photo':
-                # YES -> It's already a photo
                 await bot.send_photo(target_channel, f_data['file_id'], caption=caption_public, reply_markup=kb)
             else:
-                # NO -> Old video file without thumb saved. Fallback to video.
+                # No thumbnail data found (old file), send video
                 await bot.send_video(target_channel, f_data['file_id'], caption=caption_public, reply_markup=kb)
+            # --- PATCH END ---
                 
         except Exception as e:
-            logger.error(f"Failed Public Post: {e}")
+            logger.error(f"Failed Public Post: {e}"))
 
         # Post to Storage Channel
         try:
