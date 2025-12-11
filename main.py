@@ -374,7 +374,7 @@ async def flavor_selected(callback: CallbackQuery):
             # --- PATCH END ---
                 
         except Exception as e:
-            logger.error(f"Failed Public Post: {e}"))
+            logger.error(f"Failed Public Post: {e}")
 
         # Post to Storage Channel
         try:
