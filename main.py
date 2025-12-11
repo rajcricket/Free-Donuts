@@ -360,20 +360,35 @@ async def handle_upload(message: Message):
     
     # 4. Check Batch
     conn = await asyncpg.connect(DB_URI)
-    # --- FIX: Use message.from_user.id instead of OWNER_ID ---
     batch = await conn.fetchrow('SELECT * FROM batches WHERE admin_id=$1 ORDER BY id DESC LIMIT 1', message.from_user.id)
     
-    if batch and len(batch['collected_ids'] or []) < batch['expected_count']:
-        new_list = (batch['collected_ids'] or []) + [db_id]
-        await conn.execute('UPDATE batches SET collected_ids=$1 WHERE id=$2', new_list, batch['id'])
+    if batch:
+        # Check current length before adding
+        current_len = len(batch['collected_ids'] or [])
+        expected = batch['expected_count']
         
-        if len(new_list) >= batch['expected_count']:
-            kb = build_product_kb(batch['id'])
-            await message.answer(f"✅ **Batch Collected!**\n\nSelect Product:", reply_markup=kb)
-        else:
-            await msg.edit_text(f"✅ Saved ({len(new_list)}/{batch['expected_count']})")
+        if current_len < expected:
+            # --- FIX: ATOMIC SQL APPEND (Race Condition Proof) ---
+            # We use array_append to let the DB handle the addition safely
+            updated_row = await conn.fetchrow(
+                'UPDATE batches SET collected_ids = array_append(collected_ids, $1) WHERE id=$2 RETURNING collected_ids',
+                db_id, batch['id']
+            )
+            
+            new_len = len(updated_row['collected_ids'])
+            
+            if new_len >= expected:
+                kb = build_product_kb(batch['id'])
+                await message.answer(f"✅ **Batch Collected!** ({new_len}/{expected})\n\nSelect Product:", reply_markup=kb)
+            else:
+                # We edit the message to show progress
+                # Note: editing too fast might hit limits, so we wrap in try/except
+                try:
+                    await msg.edit_text(f"✅ Saved ({new_len}/{expected})")
+                except:
+                    pass
     else:
-        # Single file upload
+        # Single file upload (No active batch found)
         kb = build_product_kb(f"single_{db_id}")
         await msg.edit_text("✅ Saved. Select Product:", reply_markup=kb)
     
