@@ -318,11 +318,12 @@ async def broadcast_cmd(message: Message):
 
 @dp.message(Command("batch"))
 async def start_batch(message: Message):
-    if message.from_user.id not in ADMIN_IDS: return # <--- UPDATED
+    if message.from_user.id not in ADMIN_IDS: return 
     try:
         count = int(message.text.split()[1])
         conn = await asyncpg.connect(DB_URI)
-        await conn.execute('INSERT INTO batches (admin_id, expected_count, collected_ids) VALUES ($1, $2, $3)', OWNER_ID, count, [])
+        # FIX: Use message.from_user.id instead of OWNER_ID
+        await conn.execute('INSERT INTO batches (admin_id, expected_count, collected_ids) VALUES ($1, $2, $3)', message.from_user.id, count, [])
         await conn.close()
         await message.answer(f"👨‍🍳 **Batch Started!**\nUpload {count} videos now.")
     except:
@@ -330,7 +331,7 @@ async def start_batch(message: Message):
 
 @dp.message(F.video | F.photo)
 async def handle_upload(message: Message):
-    if message.from_user.id not in ADMIN_IDS: return # <--- UPDATED
+    if message.from_user.id not in ADMIN_IDS: return 
     
     msg = await message.answer("⏳ Saving...")
     
@@ -342,25 +343,25 @@ async def handle_upload(message: Message):
     fid = None
     ftype = 'photo'
     caption = message.caption or ""
-    thumb_id = None # New variable
+    thumb_id = None 
 
     if message.video:
         fid = message.video.file_id
         ftype = 'video'
-        # CAPTURE THUMBNAIL HERE
         if message.video.thumbnail:
             thumb_id = message.video.thumbnail.file_id
     elif message.photo:
         fid = message.photo[-1].file_id
         ftype = 'photo'
-        thumb_id = fid # For photo files, the file itself is the thumb
+        thumb_id = fid 
     
-    # 3. Save to DB (Now with thumb_id)
+    # 3. Save to DB 
     db_id = await save_file(fid, ftype, caption, thumb_id)
     
     # 4. Check Batch
     conn = await asyncpg.connect(DB_URI)
-    batch = await conn.fetchrow('SELECT * FROM batches WHERE admin_id=$1 ORDER BY id DESC LIMIT 1', OWNER_ID)
+    # --- FIX: Use message.from_user.id instead of OWNER_ID ---
+    batch = await conn.fetchrow('SELECT * FROM batches WHERE admin_id=$1 ORDER BY id DESC LIMIT 1', message.from_user.id)
     
     if batch and len(batch['collected_ids'] or []) < batch['expected_count']:
         new_list = (batch['collected_ids'] or []) + [db_id]
