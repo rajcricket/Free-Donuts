@@ -196,9 +196,10 @@ def decode_payload(payload):
 async def start_handler(message: Message):
     await add_user(message.from_user.id)
     
-    # 1. Force Join Check
+    # 1. Force Join Check (DISABLED TEMPORARILY)
+    # Changed "if not ..." to "if False and not ..." to bypass it
     u_id = message.from_user.id
-    if not (await is_subscribed(u_id, FS_CHANNEL_ID) and await is_subscribed(u_id, FS_CHANNEL_ID_2)):
+    if False and not (await is_subscribed(u_id, FS_CHANNEL_ID) and await is_subscribed(u_id, FS_CHANNEL_ID_2)):
         try: link1 = (await bot.get_chat(FS_CHANNEL_ID)).invite_link
         except: link1 = "https://t.me/BACKUP1"
         try: link2 = (await bot.get_chat(FS_CHANNEL_ID_2)).invite_link
@@ -214,6 +215,9 @@ async def start_handler(message: Message):
         ])
         await message.answer("⚠️ **Access Restricted**\nJoin both channels to enter the bakery.", reply_markup=kb)
         return
+
+    # 2. Logic Router
+    # ... rest of the code stays the same ...
 
     # 2. Logic Router
     args = message.text.split(' ')
